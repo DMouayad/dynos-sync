@@ -171,4 +171,37 @@ void main() {
     expect(local.data.containsKey('tasks:mine'), isTrue);
     expect(local.data.containsKey('tasks:theirs'), isFalse);
   });
+
+  test('applyRemoteRows never rewinds the stored watermark', () async {
+    final local = _MemLocal();
+    final timestamps = _MemTimestamps();
+    timestamps.map['tasks'] = t2;
+
+    await engine(local, timestamps)
+        .applyRemoteRows('tasks', const [], watermark: t1);
+
+    expect(
+      timestamps.map['tasks'],
+      equals(t2),
+      reason: 'a stale cursor must not rewind the table watermark',
+    );
+  });
+
+  test('pullTable with an older since never rewinds the watermark', () async {
+    final local = _MemLocal();
+    final timestamps = _MemTimestamps();
+    timestamps.map['tasks'] = t2;
+    final remote = _RowRemote([
+      {'id': 'a', 'updated_at': t1.toIso8601String(), 'name': 'A'},
+    ]);
+
+    await engine(local, timestamps, remote: remote)
+        .pullTable('tasks', since: t1);
+
+    expect(
+      timestamps.map['tasks'],
+      equals(t2),
+      reason: 'older re-pulled rows must not move the watermark back',
+    );
+  });
 }

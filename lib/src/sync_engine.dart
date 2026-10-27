@@ -444,7 +444,10 @@ class SyncEngine {
     try {
       final pendingIds = await queue.getPendingIds(table);
       final count = await _applyRows(table, rows, pendingIds);
-      if (watermark != null) {
+      // Watermarks only move forward: a stale host cursor must never rewind the
+      // table, and a future one must never skip unfetched rows.
+      if (watermark != null &&
+          watermark.isAfter(await timestamps.get(table))) {
         await timestamps.set(table, watermark);
       }
       _emit(SyncPullComplete(
@@ -503,7 +506,9 @@ class SyncEngine {
       // commits in that gap — unbounded, permanent data loss for that device.
       // Server timestamps are the only clock the `.gt(updated_at, since)`
       // comparison is valid against. Every row here already satisfies
-      // `updated_at > since`, so this advances the watermark monotonically.
+      // `updated_at > since`, so this advances the watermark monotonically;
+      // the write is additionally guarded against the stored watermark so the
+      // public `pullTable(since:)` path cannot rewind it.
       DateTime? maxServerTs;
       for (final row in rows) {
         final ts = _extractTimestamp(row);
@@ -515,7 +520,8 @@ class SyncEngine {
       // unchanged rather than guessing `now()`: worst case we re-pull these
       // same rows next cycle (idempotent upsert), which is strictly safer than
       // advancing past server writes we have not seen.
-      if (maxServerTs != null) {
+      if (maxServerTs != null &&
+          maxServerTs.isAfter(await timestamps.get(table))) {
         await timestamps.set(table, maxServerTs);
       }
 
