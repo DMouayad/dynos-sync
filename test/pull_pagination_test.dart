@@ -1,4 +1,5 @@
 import 'package:test/test.dart';
+import 'package:supabase/supabase.dart';
 import 'package:dynos_sync/src/adapters/supabase_remote_store.dart';
 
 /// Tests for the paged pull window (dynos-fit/dynos-sync#104, option 1):
@@ -45,5 +46,16 @@ void main() {
 
     expect(rows.length, equals(4));
     expect(calls, equals([(0, 2), (2, 2), (4, 2)]));
+  });
+
+  test('pullPageSize must be positive', () {
+    expect(
+      () => SupabaseRemoteStore(
+        client: SupabaseClient('http://localhost', 'anon'),
+        userId: () => 'u1',
+        pullPageSize: 0,
+      ),
+      throwsA(isA<AssertionError>()),
+    );
   });
 }

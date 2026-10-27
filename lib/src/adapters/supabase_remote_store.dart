@@ -7,14 +7,16 @@ import '../sync_entry.dart';
 
 /// Fetches one pull page: [limit] rows starting at [offset], or the whole
 /// window when [limit] is null.
-typedef PullPageFetcher =
-    Future<List<Map<String, dynamic>>> Function(int offset, int? limit);
+typedef PullPageFetcher = Future<List<Map<String, dynamic>>> Function(
+    int offset, int? limit);
 
 /// Fetches the complete pull window in ascending `updated_at`, `id` order.
 ///
 /// When [pageSize] is null the window is fetched with a single unbounded
-/// query. When set, pages are fetched until a short page ends the loop, so a
-/// page cap can never silently truncate the window.
+/// query. When set, pages are fetched until a short page ends the loop — on
+/// the assumption that the server serves full pages; keep [pageSize] at or
+/// below the API's max-rows setting so a server-side cap is not mistaken for
+/// the end of the window.
 @visibleForTesting
 Future<List<Map<String, dynamic>>> fetchPullWindow(
   int? pageSize,
@@ -58,15 +60,20 @@ class SupabaseRemoteStore implements RemoteStore {
   ///   Example: `{'tasks': 'tasks_at', 'notes': 'notes_at'}`.
   /// - [pullPageSize]: Rows fetched per page during pulls. `null` (default)
   ///   issues one unbounded query; when set, [pullSince] pages in ascending
-  ///   `updated_at`, `id` order until the window is exhausted, so a page cap
-  ///   can never silently truncate a pull.
+  ///   `updated_at`, `id` order until the window is exhausted. Keep it at or
+  ///   below the project's API max-rows setting: a server-side cap makes a
+  ///   truncated window look like a short final page, and the watermark then
+  ///   advances past rows that were never fetched.
   const SupabaseRemoteStore({
     required this.client,
     required this.userId,
     this.syncStatusTable = 'sync_status',
     this.tableTimestampKeys = const {},
     this.pullPageSize,
-  });
+  }) : assert(
+          pullPageSize == null || pullPageSize > 0,
+          'pullPageSize must be positive',
+        );
 
   /// The Supabase client used for all remote operations.
   final SupabaseClient client;
