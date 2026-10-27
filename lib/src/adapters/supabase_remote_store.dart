@@ -1,13 +1,42 @@
+import 'package:meta/meta.dart';
 import 'package:supabase/supabase.dart';
 import '../remote_store.dart';
 import '../sync_exceptions.dart';
 import '../sync_operation.dart';
 import '../sync_entry.dart';
 
+/// Fetches one pull page: [limit] rows starting at [offset], or the whole
+/// window when [limit] is null.
+typedef PullPageFetcher =
+    Future<List<Map<String, dynamic>>> Function(int offset, int? limit);
+
+/// Fetches the complete pull window in ascending `updated_at`, `id` order.
+///
+/// When [pageSize] is null the window is fetched with a single unbounded
+/// query. When set, pages are fetched until a short page ends the loop, so a
+/// page cap can never silently truncate the window.
+@visibleForTesting
+Future<List<Map<String, dynamic>>> fetchPullWindow(
+  int? pageSize,
+  PullPageFetcher fetch,
+) async {
+  if (pageSize == null) return fetch(0, null);
+  final rows = <Map<String, dynamic>>[];
+  var offset = 0;
+  while (true) {
+    final page = await fetch(offset, pageSize);
+    rows.addAll(page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return rows;
+}
+
 /// [RemoteStore] implementation using Supabase Postgrest.
 ///
 /// Pushes records via `.upsert()` / `.update()` / `.delete()` and pulls via
-/// `.select().gt('updated_at', since)`.
+/// `.select().gt('updated_at', since)` — paged in ascending `updated_at`, `id`
+/// order when [SupabaseRemoteStore.pullPageSize] is set.
 ///
 /// ## Smart Sync Gate
 ///
@@ -27,11 +56,16 @@ class SupabaseRemoteStore implements RemoteStore {
   /// - [syncStatusTable]: Name of the sync status table (default: `sync_status`).
   /// - [tableTimestampKeys]: Maps table names to their `sync_status` column names.
   ///   Example: `{'tasks': 'tasks_at', 'notes': 'notes_at'}`.
+  /// - [pullPageSize]: Rows fetched per page during pulls. `null` (default)
+  ///   issues one unbounded query; when set, [pullSince] pages in ascending
+  ///   `updated_at`, `id` order until the window is exhausted, so a page cap
+  ///   can never silently truncate a pull.
   const SupabaseRemoteStore({
     required this.client,
     required this.userId,
     this.syncStatusTable = 'sync_status',
     this.tableTimestampKeys = const {},
+    this.pullPageSize,
   });
 
   /// The Supabase client used for all remote operations.
@@ -46,6 +80,9 @@ class SupabaseRemoteStore implements RemoteStore {
 
   /// Maps synced table names to their corresponding timestamp column in [syncStatusTable].
   final Map<String, String> tableTimestampKeys;
+
+  /// Rows fetched per page during pulls, or `null` for one unbounded query.
+  final int? pullPageSize;
 
   @override
   Future<void> push(
@@ -126,11 +163,20 @@ class SupabaseRemoteStore implements RemoteStore {
     DateTime since,
   ) async {
     try {
-      final rows = await client
-          .from(table)
-          .select()
-          .gt('updated_at', since.toIso8601String());
-      return List<Map<String, dynamic>>.from(rows);
+      final rows = await fetchPullWindow(pullPageSize, (offset, limit) async {
+        final query = client
+            .from(table)
+            .select()
+            .gt('updated_at', since.toIso8601String())
+            .order('updated_at', ascending: true)
+            .order('id', ascending: true);
+        return List<Map<String, dynamic>>.from(
+          limit == null
+              ? await query
+              : await query.range(offset, offset + limit - 1),
+        );
+      });
+      return rows;
     } on AuthException catch (e) {
       throw AuthExpiredException(e);
     } on FormatException catch (e) {
