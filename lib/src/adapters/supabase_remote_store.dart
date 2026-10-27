@@ -20,6 +20,9 @@ typedef PullPageFetcher = Future<List<Map<String, dynamic>>> Function(
 /// the assumption that the server serves full pages; keep [pageSize] at or
 /// below the API's max-rows setting so a server-side cap is not mistaken for
 /// the end of the window.
+///
+/// Throws [SyncRemoteException] if a full page repeats its predecessor: an
+/// offset-ignoring or range-clamped server would otherwise loop forever.
 Future<List<Map<String, dynamic>>> fetchPullWindow(
   int? pageSize,
   PullPageFetcher fetch,
@@ -27,10 +30,20 @@ Future<List<Map<String, dynamic>>> fetchPullWindow(
   if (pageSize == null) return fetch(0, null);
   final rows = <Map<String, dynamic>>[];
   var offset = 0;
+  var previousHead = '';
   while (true) {
     final page = await fetch(offset, pageSize);
     rows.addAll(page);
     if (page.length < pageSize) break;
+    final head = page.first.toString();
+    if (head == previousHead) {
+      throw SyncRemoteException(
+        message:
+            'pull window made no progress at offset $offset; '
+            'keep pullPageSize at or below the API max-rows setting',
+      );
+    }
+    previousHead = head;
     offset += pageSize;
   }
   return rows;

@@ -1,6 +1,7 @@
 import 'package:test/test.dart';
 import 'package:supabase/supabase.dart';
 import 'package:dynos_sync/src/adapters/supabase_remote_store.dart';
+import 'package:dynos_sync/src/sync_exceptions.dart';
 
 /// Tests for the paged pull window (dynos-fit/dynos-sync#104, option 1):
 /// `pullSince` must walk the window in ascending order until exhaustion, so a
@@ -46,6 +47,20 @@ void main() {
 
     expect(rows.length, equals(4));
     expect(calls, equals([(0, 2), (2, 2), (4, 2)]));
+  });
+
+  test('a repeated full page throws instead of looping forever', () async {
+    var calls = 0;
+    Future<List<Map<String, dynamic>>> clamped(int offset, int? limit) async {
+      calls++;
+      return List.generate(2, (i) => <String, dynamic>{'id': 'r$i'});
+    }
+
+    await expectLater(
+      fetchPullWindow(2, clamped),
+      throwsA(isA<SyncRemoteException>()),
+    );
+    expect(calls, equals(2));
   });
 
   test('pullPageSize must be positive', () {
