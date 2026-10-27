@@ -383,7 +383,7 @@ class SyncEngine {
     try {
       final remoteTs = await remote.getRemoteTimestamps();
 
-      final pulls = <Future<void>>[];
+      final pulls = <Future<int>>[];
       for (final table in tables) {
         final remoteTime = remoteTs[table];
         if (remoteTime == null) {
@@ -414,6 +414,56 @@ class SyncEngine {
     }
   }
 
+  /// Pulls a single table's changes since [since] (or the table's current
+  /// watermark) through the standard gate: fetch, RLS validation, conflict
+  /// resolution, and a single watermark write from the server rows.
+  ///
+  /// Returns the number of rows applied; failures surface on [events] as
+  /// [SyncError], not as exceptions.
+  Future<int> pullTable(String table, {DateTime? since}) async {
+    final sinceTs = since ?? await timestamps.get(table);
+    return _pullTable(table, sinceTs);
+  }
+
+  /// Applies pre-fetched remote [rows] for [table] through the same
+  /// validation and conflict paths as [pullAll] — for hosts that fetch pages
+  /// themselves and need a typed batch apply with a single watermark write.
+  ///
+  /// [watermark]: when non-null, the table watermark is advanced to it after
+  /// the rows are applied. Pass only a server-derived cursor — the newest
+  /// `updated_at` actually fetched — never the device wall clock; a future
+  /// watermark permanently skips rows committed in the gap.
+  ///
+  /// Returns the number of rows applied; failures surface on [events] as
+  /// [SyncError], not as exceptions.
+  Future<int> applyRemoteRows(
+    String table,
+    List<Map<String, dynamic>> rows, {
+    DateTime? watermark,
+  }) async {
+    try {
+      final pendingIds = await queue.getPendingIds(table);
+      final count = await _applyRows(table, rows, pendingIds);
+      if (watermark != null) {
+        await timestamps.set(table, watermark);
+      }
+      _emit(SyncPullComplete(
+        timestamp: DateTime.now().toUtc(),
+        table: table,
+        rowCount: count,
+      ));
+      return count;
+    } catch (e, st) {
+      onError?.call(e, st, 'applyRemoteRows[$table]');
+      _emit(SyncError(
+        timestamp: DateTime.now().toUtc(),
+        error: e,
+        context: 'applyRemoteRows[$table]',
+      ));
+      return 0;
+    }
+  }
+
   /// Pull a single table's changes since [since].
   ///
   /// [gateCursor] is the per-table remote timestamp the sync gate used to
@@ -421,7 +471,7 @@ class SyncEngine {
   /// watermark (guarded monotonically against [since]) so an empty table is
   /// skipped next cycle instead of being re-queried forever. Never derived
   /// from the device wall clock.
-  Future<void> _pullTable(
+  Future<int> _pullTable(
     String table,
     DateTime since, {
     DateTime? gateCursor,
@@ -437,40 +487,13 @@ class SyncEngine {
           table: table,
           rowCount: 0,
         ));
-        return;
+        return 0;
       }
 
       // Batch-fetch all IDs for un-synced local records for this table.
       final pendingIds = await queue.getPendingIds(table);
 
-      var upsertedCount = 0;
-      for (final row in rows) {
-        final id = row['id']?.toString();
-        if (id == null) continue;
-
-        // RLS pull validation
-        if (userId != null) {
-          final rowOwner = (row['user_id'] ?? row['owner_id'])?.toString();
-          if (rowOwner != null && rowOwner != userId) {
-            _emit(SyncError(
-              timestamp: DateTime.now().toUtc(),
-              error: RlsViolationException(recordId: id, rowOwner: rowOwner),
-              context: 'rls_violation[$table/$id]',
-            ));
-            continue;
-          }
-        }
-
-        // Conflict resolution instead of blind skip
-        if (pendingIds.contains(id)) {
-          await _resolveConflict(table, id, row);
-          upsertedCount++;
-          continue;
-        }
-
-        await local.upsert(table, id, row);
-        upsertedCount++;
-      }
+      final upsertedCount = await _applyRows(table, rows, pendingIds);
 
       // Advance the delta watermark from the newest *server* `updated_at`
       // we actually observed — never the device wall clock. Deriving it from
@@ -501,6 +524,7 @@ class SyncEngine {
         table: table,
         rowCount: upsertedCount,
       ));
+      return upsertedCount;
     } catch (e, st) {
       onError?.call(e, st, 'pull[$table]');
       _emit(SyncError(
@@ -508,7 +532,46 @@ class SyncEngine {
         error: e,
         context: 'pull[$table]',
       ));
+      return 0;
     }
+  }
+
+  /// Applies pulled [rows] through the RLS gate, conflict resolution and the
+  /// local upsert. Returns the number of rows applied.
+  Future<int> _applyRows(
+    String table,
+    List<Map<String, dynamic>> rows,
+    Set<String> pendingIds,
+  ) async {
+    var upsertedCount = 0;
+    for (final row in rows) {
+      final id = row['id']?.toString();
+      if (id == null) continue;
+
+      // RLS pull validation
+      if (userId != null) {
+        final rowOwner = (row['user_id'] ?? row['owner_id'])?.toString();
+        if (rowOwner != null && rowOwner != userId) {
+          _emit(SyncError(
+            timestamp: DateTime.now().toUtc(),
+            error: RlsViolationException(recordId: id, rowOwner: rowOwner),
+            context: 'rls_violation[$table/$id]',
+          ));
+          continue;
+        }
+      }
+
+      // Conflict resolution instead of blind skip
+      if (pendingIds.contains(id)) {
+        await _resolveConflict(table, id, row);
+        upsertedCount++;
+        continue;
+      }
+
+      await local.upsert(table, id, row);
+      upsertedCount++;
+    }
+    return upsertedCount;
   }
 
   // ── Conflict Resolution ───────────────────────────────────────────────────
