@@ -1,4 +1,3 @@
-import 'package:meta/meta.dart';
 import 'package:supabase/supabase.dart';
 import '../remote_store.dart';
 import '../sync_exceptions.dart';
@@ -12,12 +11,15 @@ typedef PullPageFetcher = Future<List<Map<String, dynamic>>> Function(
 
 /// Fetches the complete pull window in ascending `updated_at`, `id` order.
 ///
+/// Public so a host store that overrides `pullSince` with its own filters,
+/// RLS scoping or decryption can reuse this paging loop instead of duplicating
+/// it — a second copy is a second place to fix a truncation bug.
+///
 /// When [pageSize] is null the window is fetched with a single unbounded
 /// query. When set, pages are fetched until a short page ends the loop — on
 /// the assumption that the server serves full pages; keep [pageSize] at or
 /// below the API's max-rows setting so a server-side cap is not mistaken for
 /// the end of the window.
-@visibleForTesting
 Future<List<Map<String, dynamic>>> fetchPullWindow(
   int? pageSize,
   PullPageFetcher fetch,
